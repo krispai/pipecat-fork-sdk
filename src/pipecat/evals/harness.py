@@ -109,6 +109,25 @@ BOT_READY_TIMEOUT_S = 10.0
 # harness doesn't pace frames — and no continuous frame stream crosses the wire.
 SEND_CHUNK_MS = 1000
 
+# Categories for :attr:`EvalAssertionFailure.kind`, the stable key for grouping
+# failures across runs. Each says how an assertion failed, so a repeated suite can
+# report "10x timeout on turn 3" without parsing free-text reasons.
+FAILURE_KINDS = (
+    "timeout",  # no event of the expected type arrived within the budget
+    "judge_no",  # the judge rejected the reply
+    "judge_continue",  # the judge never accepted the reply before the budget ran out
+    "no_judge",  # the scenario uses `eval:` but no judge could be built
+    "no_content",  # the matched event carried no text to judge
+    "text_mismatch",  # `text_contains` not present in the event's text
+    "missing_function_call",  # an expected function call never arrived
+    "function_args_mismatch",  # the call arrived with unexpected arguments
+    "unexpected_event",  # an `absent:` expectation saw the event it forbade
+    "send_after_timeout",  # a turn's `send_after` event never fired
+    "connect_failed",  # never connected to the bot's eval transport
+    "handshake_timeout",  # connected, but the bot never sent bot-ready
+    "harness_error",  # the harness itself raised (sub-pipeline, judge, ...)
+)
+
 
 @dataclass
 class EvalAssertionFailure:
@@ -120,12 +139,18 @@ class EvalAssertionFailure:
             turn-level failure (e.g. a ``send_after`` that never fired).
         event_name: The expectation's event name.
         reason: Human-readable explanation of the failure.
+        kind: Machine-readable failure category, one of ``FAILURE_KINDS``. Says
+            *how* the assertion failed (the judge rejected the reply, no event
+            arrived, a function call was missing, ...), not what it means about
+            the bot. ``reason`` is free text and differs on every run — often
+            judge prose — so grouping failures across many runs keys on this.
     """
 
     turn_index: int
     expectation_index: int
     event_name: str
     reason: str
+    kind: str
 
     def __str__(self) -> str:
         return (
@@ -431,6 +456,7 @@ class EvalSession:
                         expectation_index=-1,
                         event_name="<connect>",
                         reason=f"failed to connect to {self._bot_url}: {e.__class__.__name__}",
+                        kind="connect_failed",
                     )
                 ],
                 duration_ms=int((time.monotonic() - started) * 1000),
@@ -471,6 +497,7 @@ class EvalSession:
                         expectation_index=-1,
                         event_name="<bot-ready>",
                         reason=f"bot-ready not received within {int(BOT_READY_TIMEOUT_S * 1000)}ms",
+                        kind="handshake_timeout",
                     )
                 )
             else:
@@ -502,6 +529,7 @@ class EvalSession:
                     expectation_index=-1,
                     event_name="<error>",
                     reason=f"{type(e).__name__}: {e}",
+                    kind="harness_error",
                 )
             )
         finally:
@@ -918,6 +946,7 @@ class EvalSession:
                         expectation_index=-1,
                         event_name=event_name,
                         reason=f"send_after never fired: {e}",
+                        kind="send_after_timeout",
                     )
                 )
                 self._debug(f"FAIL: {event_name}: {failures[-1].reason}")
@@ -975,6 +1004,7 @@ class EvalSession:
                         expectation_index=exp_idx,
                         event_name=expectation.event,
                         reason=reason,
+                        kind="timeout",
                     )
                 )
                 self._debug(f"FAIL: {expectation.event}: {reason}")
@@ -1179,11 +1209,11 @@ class EvalSession:
                 self._last_match_text = self._match_summary(event)
             return judge_failure
 
-        def fail(reason: str) -> EvalAssertionFailure:
-            return EvalAssertionFailure(turn_idx, exp_idx, expectation.event, reason)
+        def fail(reason: str, kind: str) -> EvalAssertionFailure:
+            return EvalAssertionFailure(turn_idx, exp_idx, expectation.event, reason, kind)
 
         if expectation.eval is not None and self._judge is None:
-            return fail("scenario uses 'eval:' but no judge could be built")
+            return fail("scenario uses 'eval:' but no judge could be built", "no_judge")
 
         check = "+".join(
             name
@@ -1204,7 +1234,13 @@ class EvalSession:
                 if not seen_any:
                     raise  # no response at all → caller logs "no matching event arrived"
                 self._debug(f"eval: timeout, not satisfied: {last_reason}")
-                return fail(f"not satisfied within {budget_ms}ms: {last_reason}")
+                # Without `eval:` the only way to be unsatisfied is a missing
+                # substring: `text_contains` is monotonic, so it holds out for more
+                # text rather than failing outright.
+                return fail(
+                    f"not satisfied within {budget_ms}ms: {last_reason}",
+                    "judge_continue" if expectation.eval is not None else "text_mismatch",
+                )
 
             seen_any = True
             delta = event.get("text", "")
@@ -1220,7 +1256,8 @@ class EvalSession:
                 self._last_match_text = aggregate
                 return None
             if status == "fail":
-                return fail(reason)
+                # Only the judge can affirmatively fail an aggregate.
+                return fail(reason, "judge_no")
             # "continue": wait for the next segment, separated by a space so
             # sentences don't run together (e.g. "...that. The weather...").
             aggregate += " "
@@ -1256,6 +1293,7 @@ class EvalSession:
                 f"expected no {expectation.event!r} within {budget_ms}ms, "
                 f"but one arrived: {self._match_summary(event)}"
             ),
+            kind="unexpected_event",
         )
 
     async def _next_matching_event(self, event_type: str, deadline: float) -> dict:
@@ -1292,8 +1330,8 @@ class EvalSession:
         failure naming the call that was missing or whose args didn't match.
         """
 
-        def fail(reason: str) -> EvalAssertionFailure:
-            return EvalAssertionFailure(turn_idx, exp_idx, expectation.event, reason)
+        def fail(reason: str, kind: str) -> EvalAssertionFailure:
+            return EvalAssertionFailure(turn_idx, exp_idx, expectation.event, reason, kind)
 
         def spec_sig(spec) -> str:
             name = spec.name or "any function"
@@ -1310,13 +1348,16 @@ class EvalSession:
             except TimeoutError:
                 want = spec.name or "any function"
                 seen = ", ".join(matched) if matched else "none"
-                return fail(f"function call {want!r} not seen (matched: {seen})")
+                return fail(
+                    f"function call {want!r} not seen (matched: {seen})", "missing_function_call"
+                )
             if spec.args:
                 actual = event.get("args") or {}
                 missing = {k: v for k, v in spec.args.items() if actual.get(k) != v}
                 if missing:
                     return fail(
-                        f"call {event.get('name')!r} args {actual!r} missing expected {missing!r}"
+                        f"call {event.get('name')!r} args {actual!r} missing expected {missing!r}",
+                        "function_args_mismatch",
                     )
             matched.append(str(event.get("name")))
 
@@ -1398,6 +1439,7 @@ class EvalSession:
                 expectation_index=exp_idx,
                 event_name=expectation.event,
                 reason=reason,
+                kind="text_mismatch",
             )
 
         if expectation.text_contains is not None:
@@ -1426,6 +1468,7 @@ class EvalSession:
                 expectation_index=exp_idx,
                 event_name=expectation.event,
                 reason="scenario uses 'eval:' but no judge could be built",
+                kind="no_judge",
             )
 
         content = event.get("text") or event.get("transcript")
@@ -1435,6 +1478,7 @@ class EvalSession:
                 expectation_index=exp_idx,
                 event_name=expectation.event,
                 reason=f"event has no text/transcript to judge: {event!r}",
+                kind="no_content",
             )
 
         self._judge.add_assistant_message(content)
@@ -1445,6 +1489,7 @@ class EvalSession:
                 expectation_index=exp_idx,
                 event_name=expectation.event,
                 reason=f"eval {expectation.eval!r}: judge said no — {verdict.reason}",
+                kind="judge_no",
             )
 
         return None
