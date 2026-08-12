@@ -1,0 +1,32 @@
+name: krisp_viva_interruption_file
+
+# Audio modality, like interruption_audio, but the interrupting turn plays a
+# real recorded WAV (audio_file:) instead of clean TTS. Krisp VIVA's noise
+# cancellation and interruption-prediction models are meant to be exercised
+# against genuine noisy/real-mic audio, not synthesized speech — a barge-in
+# recorded with real background noise is a much more meaningful test of the
+# filter + KrispVivaIPUserTurnStartStrategy than a clean Kokoro utterance.
+#
+# Supply the recording at assets/krisp_interrupt_capital_japan.wav: a mono,
+# 16-bit PCM WAV of someone saying "Actually, never mind that — what's the
+# capital of Japan?", ideally recorded with the kind of background noise you
+# want the NC filter exercised against. audio_file: is resolved relative to
+# this scenario file.
+
+user: !include user_audio.yaml
+
+judge: !include judge_audio.yaml
+
+turns:
+  - user: "Tell me a long, detailed story about the history of Paris."
+    expect:
+      - event: llm_started
+
+  - user: "Actually, never mind that — what's the capital of Japan?"
+    audio_file: ../assets/krisp_interrupt_capital_japan.wav
+    send_after:
+      event: llm_started
+      delay_ms: 2000
+    expect:
+      - event: response
+        eval: "the response says the capital of Japan is Tokyo, instead of continuing the Paris story"

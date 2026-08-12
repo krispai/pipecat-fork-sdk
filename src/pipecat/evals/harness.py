@@ -91,7 +91,7 @@ from pipecat.evals.serializer import (
     EVAL_CONTEXT_MESSAGE_TYPE,
     EVAL_IMAGE_MESSAGE_TYPE,
 )
-from pipecat.evals.speech import EvalSpeech
+from pipecat.evals.speech import EvalSpeech, read_wav
 from pipecat.evals.transcribe import EvalTranscriber
 
 # Generous default so an expectation without an explicit ``within_ms`` waits
@@ -897,7 +897,8 @@ class EvalSession:
 
         The user turn is sent as ``send-text`` (text mode) or, when the scenario
         provides a ``user_audio`` block, as chunked ``raw-audio`` messages that
-        the bot's STT transcribes for real.
+        the bot's STT transcribes for real — synthesized via TTS, or read
+        verbatim from the turn's ``audio_file:`` when set.
         """
         failures: list[EvalAssertionFailure] = []
         # The turn's function calls match by name in any order; start each turn
@@ -931,10 +932,14 @@ class EvalSession:
             await self._send_image(turn.image)
 
         if turn.user is not None:
-            self._debug(f"send: {turn.user!r} ({'audio' if self._speech is not None else 'text'})")
-            if self._speech is not None:
+            if turn.audio_file is not None:
+                self._debug(f"send: {turn.user!r} (audio_file: {turn.audio_file})")
+                await self._send_user_audio_file(turn.audio_file)
+            elif self._speech is not None:
+                self._debug(f"send: {turn.user!r} (audio)")
                 await self._send_user_audio(turn.user)
             else:
+                self._debug(f"send: {turn.user!r} (text)")
                 await self._send_user_text(turn.user, self._scenario.bot_audio)
             # Record the user turn in the judge's conversation, so a later reply is
             # judged in context (e.g. a terse "That's four" answering this question).
@@ -1052,6 +1057,17 @@ class EvalSession:
         """
         assert self._speech is not None  # only called for audio-mode turns
         pcm, sample_rate = await self._speech.generate(text)
+        for chunk in _audio_chunks(pcm, sample_rate):
+            await self._send_raw_audio(chunk, sample_rate)
+
+    async def _send_user_audio_file(self, path: str) -> None:
+        """Load a recorded WAV and send it verbatim, bypassing TTS entirely.
+
+        Used for ``audio_file:`` turns — e.g. a real recording (with genuine
+        background noise, a specific mic's characteristics) rather than clean
+        synthesized speech. Sent at the file's own sample rate.
+        """
+        pcm, sample_rate = read_wav(Path(path))
         for chunk in _audio_chunks(pcm, sample_rate):
             await self._send_raw_audio(chunk, sample_rate)
 

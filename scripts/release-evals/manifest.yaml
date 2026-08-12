@@ -89,7 +89,7 @@ suite:
   - bot: voice/voice-kokoro.py
     scenarios: [capital_question]
   - bot: voice/voice-krisp-viva.py
-    scenarios: [capital_question]
+    scenarios: [capital_question, krisp_viva_interruption_file]
   - bot: voice/voice-langchain.py
     scenarios: [capital_question]
   - bot: voice/voice-lmnt.py

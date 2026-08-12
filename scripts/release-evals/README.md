@@ -132,7 +132,8 @@ A scenario is a sequence of `turns`. A turn sends a `user` utterance, presses
 DTMF keys with `dtmf:` (mutually exclusive with `user:`), or is
 observation-only (neither field) and just asserts — used for bot-first turns
 like an opening greeting. The full file
-format (events, expectations, `send_after:`, `image:`, ...) is documented in the
+format (events, expectations, `send_after:`, `image:`, `audio_file:`, ...) is
+documented in the
 [`pipecat.evals.scenario`](../../src/pipecat/evals/scenario.py) module docstring.
 
 Two things worth knowing when authoring:
@@ -153,6 +154,29 @@ with `!include` (resolved relative to the scenario file):
 user: !include user_audio.yaml
 judge: !include judge_audio.yaml
 ```
+
+## Recorded audio input (`audio_file:`)
+
+In audio modality, a `user:` turn is normally synthesized via TTS. A turn can
+instead play back a real recording with `audio_file:` (a path to a mono
+16-bit PCM WAV, resolved relative to the scenario file) — `user:` is still
+required as the turn's text label, but the audio sent to the bot comes from
+the file. Useful when clean synthesized speech isn't representative of what
+you're testing — e.g. exercising a noise-cancellation filter against genuine
+background noise, or a specific mic/accent:
+
+```yaml
+- user: "Actually, never mind that — what's the capital of Japan?"
+  audio_file: ../assets/interrupt_capital_japan.wav
+  send_after:
+    event: llm_started
+    delay_ms: 2000
+```
+
+See `krisp_viva_interruption_file` for a full example (a real barge-in
+recording interrupting the bot mid-response, for testing Krisp VIVA's noise
+cancellation and interruption prediction against actual noisy audio rather
+than clean TTS).
 
 ## Vision (image input)
 

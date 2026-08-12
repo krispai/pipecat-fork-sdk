@@ -95,6 +95,23 @@ transport serves it. ``send_after`` with only ``delay_ms`` (no ``event``) is a
 pure time delay relative to the previous send — handy for pacing keypresses
 across ``dtmf`` turns to exercise the aggregator's idle-timeout flush.
 
+A ``user`` turn may also include ``audio_file:`` (a path, relative to the
+scenario file, to a mono 16-bit PCM WAV) to send that recording instead of
+synthesizing ``user:`` via TTS. ``user:`` is still required — it stays the
+turn's text label (judge context, progress logs) — but the actual audio played
+into the bot's pipeline comes from the file, at the file's own sample rate.
+Only valid when the scenario's ``user.modality`` is ``audio`` (see below).
+Useful when you need a specific real recording — background noise, a real
+mic's characteristics, a specific accent — rather than clean synthesized
+speech, e.g. testing a noise-cancellation filter against genuine noisy audio::
+
+    turns:
+      - user: "Actually, never mind that — what's the capital of Japan?"
+        audio_file: audio/interrupt_capital_japan.wav
+        send_after:
+          event: llm_started
+          delay_ms: 2000
+
 ``expect:`` is optional; omit it for a turn that only sends input or only waits.
 
 Top-level optional fields:
@@ -322,6 +339,11 @@ class EvalTurn:
             relative to the scenario file). When a function-calling-video bot
             requests a user image during the turn, the eval transport serves this
             one. Stays registered until a later turn provides a different image.
+        audio_file: Optional path to a mono 16-bit PCM WAV (resolved relative to
+            the scenario file) to send instead of synthesizing ``user`` via TTS.
+            Only valid on a ``user`` turn when the scenario's ``user.modality`` is
+            ``audio``; ``user`` itself is still required as the turn's text label
+            for judge context and progress logs.
     """
 
     user: str | None
@@ -329,6 +351,7 @@ class EvalTurn:
     dtmf: str | None = None
     send_after: EvalSendAfter | None = None
     image: str | None = None
+    audio_file: str | None = None
 
 
 @dataclass
@@ -439,6 +462,14 @@ class EvalScenario:
         # turn via TTS (exercising the bot's STT); text sends it as text. Stored
         # internally as user_audio (the speech config when audio, else None).
         user_audio = _parse_user_block(data.get("user"), path)
+
+        if user_audio is None:
+            for idx, turn in enumerate(turns):
+                if turn.audio_file is not None:
+                    raise ValueError(
+                        f"{path}: turn #{idx} has 'audio_file:' but 'user.modality' is not "
+                        "'audio' — set 'user: {modality: audio, speech: {...}}'"
+                    )
 
         # judge: { modality: audio|text, eval: {...}, transcription: {...} }. Audio
         # means the bot speaks and the judge evaluates the transcription of its
@@ -634,7 +665,23 @@ def _parse_turn(t: Any, path: Path, idx: int) -> EvalTurn:
             raise ValueError(f"{path}: turn #{idx} 'image:' must be a path string")
         image = str((path.parent / image).resolve())
 
-    return EvalTurn(user=user, dtmf=dtmf, expect=expect, send_after=send_after, image=image)
+    # Audio file paths resolve relative to the scenario file too. audio_modality
+    # (whether the scenario's user.modality is audio) isn't known until the whole
+    # document is parsed, so that check happens in EvalScenario.load().
+    audio_file = t.get("audio_file")
+    if audio_file is not None:
+        if not isinstance(audio_file, str):
+            raise ValueError(f"{path}: turn #{idx} 'audio_file:' must be a path string")
+        if user is None:
+            raise ValueError(
+                f"{path}: turn #{idx} has 'audio_file:' but no 'user:' — 'user:' is still "
+                "required as the turn's text label (judge context, progress logs)"
+            )
+        audio_file = str((path.parent / audio_file).resolve())
+
+    return EvalTurn(
+        user=user, dtmf=dtmf, expect=expect, send_after=send_after, image=image, audio_file=audio_file
+    )
 
 
 def _parse_dtmf(dtmf: Any, path: Path, turn_idx: int) -> str | None:

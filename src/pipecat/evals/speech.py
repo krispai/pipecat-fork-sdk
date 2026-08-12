@@ -58,6 +58,29 @@ DEFAULT_CACHE_DIR = _default_cache_dir()
 DEFAULT_SAMPLE_RATE = 16000
 
 
+def read_wav(path: Path) -> tuple[bytes, int]:
+    """Read a mono 16-bit PCM WAV file. Returns ``(pcm_bytes, sample_rate)``.
+
+    Shared by :class:`EvalSpeech`'s cache and by scenario turns that send a
+    recorded file directly via ``audio_file:`` instead of synthesizing via TTS.
+
+    Args:
+        path: Path to the WAV file.
+
+    Returns:
+        Tuple of ``(pcm_bytes, sample_rate)``.
+
+    Raises:
+        ValueError: If the file isn't mono 16-bit PCM.
+    """
+    with wave.open(str(path), "rb") as wf:
+        if wf.getnchannels() != 1:
+            raise ValueError(f"{path}: expected mono, got {wf.getnchannels()} channels")
+        if wf.getsampwidth() != 2:
+            raise ValueError(f"{path}: expected 16-bit, got {wf.getsampwidth() * 8}-bit")
+        return wf.readframes(wf.getnframes()), wf.getframerate()
+
+
 def tts_sample_rate(voice_cfg: dict) -> int:
     """The sample rate a ``user_audio`` block asks for (default 16 kHz)."""
     return int(voice_cfg.get("sample_rate", DEFAULT_SAMPLE_RATE))
@@ -255,7 +278,7 @@ class EvalSpeech:
 
         if cache_file is not None and cache_file.exists():
             try:
-                pcm, cached_sr = self._read_wav(cache_file)
+                pcm, cached_sr = read_wav(cache_file)
                 if cached_sr == self._sample_rate:
                     return pcm, self._sample_rate
                 logger.info(
@@ -336,16 +359,6 @@ class EvalSpeech:
             base = DEFAULT_CACHE_DIR
         base.mkdir(parents=True, exist_ok=True)
         return base
-
-    @staticmethod
-    def _read_wav(path: Path) -> tuple[bytes, int]:
-        """Read a mono 16-bit PCM WAV file. Returns (pcm_bytes, sample_rate)."""
-        with wave.open(str(path), "rb") as wf:
-            if wf.getnchannels() != 1:
-                raise ValueError(f"{path}: expected mono, got {wf.getnchannels()} channels")
-            if wf.getsampwidth() != 2:
-                raise ValueError(f"{path}: expected 16-bit, got {wf.getsampwidth() * 8}-bit")
-            return wf.readframes(wf.getnframes()), wf.getframerate()
 
     @staticmethod
     def _write_wav(path: Path, pcm: bytes, sample_rate: int) -> None:
