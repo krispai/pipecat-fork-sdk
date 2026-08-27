@@ -39,7 +39,10 @@ class TransportParams(BaseModel):
         audio_in_enabled: Enable audio input streaming.
         audio_in_sample_rate: Input audio sample rate in Hz.
         audio_in_channels: Number of input audio channels.
-        audio_in_filter: Audio filter to apply to input audio.
+        audio_in_filter: Audio filter to apply to input audio. Its output is
+            attached to each frame as ``filtered_audio``, which VAD, turn
+            strategies, and (by default) STT use in place of the original,
+            unmodified ``audio``.
         audio_in_stream_on_start: Start audio streaming immediately on transport start.
         audio_in_passthrough: Pass through input audio frames downstream.
         video_in_enabled: Enable video input streaming.

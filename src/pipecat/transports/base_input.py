@@ -278,14 +278,12 @@ class BaseInputTransport(FrameProcessor):
                 # From now on, timeout should warn if there's no audio.
                 audio_received = True
 
-                # Filter audio, if an audio filter is available.
+                # Run the audio filter, if any, without touching `frame.audio` so
+                # STT and other consumers keep getting the original signal.
+                # Components that want filtered audio (VAD, turn strategies) read
+                # `frame.filtered_audio` / `frame.analysis_audio` instead.
                 if self._params.audio_in_filter:
-                    frame.audio = await self._params.audio_in_filter.filter(frame.audio)
-
-                # Skip frames with no audio data (e.g. filter is buffering).
-                if not frame.audio:
-                    self._audio_in_queue.task_done()
-                    continue
+                    frame.filtered_audio = await self._params.audio_in_filter.filter(frame.audio)
 
                 # Push audio downstream if passthrough is set.
                 if self._params.audio_in_passthrough:

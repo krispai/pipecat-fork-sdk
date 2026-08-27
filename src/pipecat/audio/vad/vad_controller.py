@@ -164,13 +164,20 @@ class VADController(BaseObject):
 
         Analyzes the audio for voice activity and triggers `on_speech_started`,
         `on_speech_stopped`, or `on_speech_activity` events based on state changes.
+        Uses `frame.analysis_audio`, which prefers filtered audio (from the
+        input transport's `audio_in_filter`, if any) over raw audio.
 
         Args:
             frame: Audio frame to process.
         """
         self._last_audio_time = time.monotonic()
 
-        self._vad_state = await self._handle_vad(frame.audio, self._vad_state)
+        audio = frame.analysis_audio
+        if audio is None:
+            # The filter is still buffering; nothing to analyze yet.
+            return
+
+        self._vad_state = await self._handle_vad(audio, self._vad_state)
 
         if self._vad_state == VADState.SPEAKING:
             await self._call_event_handler("on_speech_activity")

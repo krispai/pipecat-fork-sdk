@@ -19,9 +19,16 @@ class BaseAudioFilter(ABC):
     """Base class for input transport audio filters.
 
     This is a base class for input transport audio filters. If an audio
-    filter is provided to the input transport it will be used to process audio
-    before VAD and before pushing it downstream. There are control frames to
-    update filter settings or to enable or disable the filter at runtime.
+    filter is provided to the input transport, its output is attached to each
+    :class:`~pipecat.frames.frames.InputAudioRawFrame` as ``filtered_audio``
+    alongside the original, unmodified ``audio``. Components that specifically
+    benefit from filtered audio (e.g. VAD, turn-start/stop strategies) read
+    ``filtered_audio`` (or the frame's ``analysis_audio`` convenience
+    property) unconditionally; STT reads it too by default, but can opt out
+    via :paramref:`~pipecat.services.stt_service.STTService.use_filtered_audio`
+    to always transcribe the original ``audio`` instead. There are control
+    frames to update filter settings or to enable or disable the filter at
+    runtime.
     """
 
     @abstractmethod

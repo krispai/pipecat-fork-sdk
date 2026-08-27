@@ -1327,7 +1327,15 @@ class InputAudioRawFrame(SystemFrame, AudioRawFrame):
     A chunk of audio usually coming from an input transport. If the transport
     supports multiple audio sources (e.g. multiple audio tracks) the source name
     will be specified in transport_source.
+
+    Parameters:
+        filtered_audio: ``audio`` after the input transport's configured
+            ``audio_in_filter`` has run, if any. ``None`` when no filter is
+            configured; empty bytes while the filter is still buffering.
+            ``audio`` itself is always the original, unfiltered signal.
     """
+
+    filtered_audio: bytes | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -1336,6 +1344,18 @@ class InputAudioRawFrame(SystemFrame, AudioRawFrame):
     def __str__(self):
         pts = format_pts(self.pts)
         return f"{self.name}(pts: {pts}, source: {self.transport_source}, size: {len(self.audio)}, frames: {self.num_frames}, sample_rate: {self.sample_rate}, channels: {self.num_channels})"
+
+    @property
+    def analysis_audio(self) -> bytes | None:
+        """Audio to use for speech/turn analysis (VAD, turn strategies).
+
+        Prefers ``filtered_audio`` when an audio filter is configured,
+        falling back to ``audio`` otherwise. Returns ``None`` while the
+        filter is still buffering and has no output yet for this chunk.
+        """
+        if self.filtered_audio is not None:
+            return self.filtered_audio or None
+        return self.audio
 
 
 @dataclass

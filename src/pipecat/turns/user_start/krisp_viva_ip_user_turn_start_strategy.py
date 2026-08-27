@@ -220,7 +220,9 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
         that the model maintains continuous internal state (matching the
         standalone Krisp SDK behaviour). ``_speech_active`` is forwarded as
         the per-frame VAD input to the model and also gates the threshold
-        evaluation.
+        evaluation. Uses ``frame.analysis_audio``, which prefers filtered
+        audio (from the input transport's ``audio_in_filter``, if any) over
+        raw audio.
 
         Args:
             frame: Raw audio input frame.
@@ -228,13 +230,18 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
         Returns:
             STOP if the model detects a genuine interruption, CONTINUE otherwise.
         """
+        audio = frame.analysis_audio
+        if audio is None:
+            # The filter is still buffering; nothing to process yet.
+            return ProcessFrameResult.CONTINUE
+
         self._ensure_session(frame.sample_rate)
 
         if self._ip_session is None or self._samples_per_frame is None:
             logger.warning("IP session not ready, skipping frame")
             return ProcessFrameResult.CONTINUE
 
-        self._audio_buffer.extend(frame.audio)
+        self._audio_buffer.extend(audio)
 
         total_samples = len(self._audio_buffer) // 2  # 2 bytes per int16 sample
         num_complete_frames = total_samples // self._samples_per_frame

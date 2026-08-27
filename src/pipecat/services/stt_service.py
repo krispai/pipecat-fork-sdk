@@ -24,6 +24,7 @@ from pipecat.frames.frames import (
     EndFrame,
     ErrorFrame,
     Frame,
+    InputAudioRawFrame,
     InterruptionFrame,
     LLMContextAssistantTurnFrame,
     StartFrame,
@@ -96,6 +97,7 @@ class STTService(AIService):
         self,
         *,
         audio_passthrough=True,
+        use_filtered_audio: bool = True,
         sample_rate: int | None = None,
         stt_ttfb_timeout: float = 2.0,
         ttfs_p99_latency: float | None = None,
@@ -109,6 +111,14 @@ class STTService(AIService):
         Args:
             audio_passthrough: Whether to pass audio frames downstream after processing.
                 Defaults to True.
+            use_filtered_audio: Whether to transcribe the input transport's filtered
+                audio (:attr:`~pipecat.frames.frames.InputAudioRawFrame.filtered_audio`)
+                rather than the original signal, when an ``audio_in_filter`` is
+                configured. Has no effect without a configured filter. Defaults
+                to True, so an ``audio_in_filter`` affects STT the same way it
+                affects every other consumer. Set to False if your STT's word
+                error rate is hurt more by the filter's artifacts than it is
+                helped by its noise reduction.
             sample_rate: The sample rate for audio input. If None, will be determined
                 from the start frame.
             stt_ttfb_timeout: Time in seconds to wait after VAD stop before reporting
@@ -159,6 +169,7 @@ class STTService(AIService):
                 self._settings.language = converted
 
         self._audio_passthrough = audio_passthrough
+        self._use_filtered_audio = use_filtered_audio
         self._init_sample_rate = sample_rate
         self._sample_rate = 0
 
@@ -419,6 +430,18 @@ class STTService(AIService):
         changed = await super()._update_settings(delta)
         return changed
 
+    def _resolve_audio(self, frame: AudioRawFrame) -> bytes | None:
+        """Return the audio bytes to transcribe for `frame`.
+
+        Uses `frame.analysis_audio` (preferring filtered audio when the input
+        transport's `audio_in_filter` produced it) when `use_filtered_audio`
+        is enabled, otherwise the original `frame.audio`. Returns `None` only
+        while a filter is configured and still buffering.
+        """
+        if self._use_filtered_audio and isinstance(frame, InputAudioRawFrame):
+            return frame.analysis_audio
+        return frame.audio
+
     async def process_audio_frame(self, frame: AudioRawFrame, direction: FrameDirection):
         """Process an audio frame for speech recognition.
 
@@ -447,16 +470,21 @@ class STTService(AIService):
         else:
             self._user_id = ""
 
-        if not frame.audio:
+        audio = self._resolve_audio(frame)
+        if audio is None:
+            # The filter is still buffering; nothing to transcribe yet.
+            return
+
+        if not audio:
             # Ignoring in case we don't have audio to transcribe.
             logger.warning(
                 f"Empty audio frame received for STT service: {self.name} {frame.num_frames}"
             )
             return
 
-        self._record_stt_audio_usage(frame.audio)
+        self._record_stt_audio_usage(audio)
 
-        await self.process_generator(self.run_stt(frame.audio))
+        await self.process_generator(self.run_stt(audio))
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Process frames, handling VAD events and audio segmentation.
@@ -906,8 +934,13 @@ class SegmentedSTTService(STTService):
         else:
             self._user_id = ""
 
+        audio = self._resolve_audio(frame)
+        if audio is None:
+            # The filter is still buffering; nothing to buffer yet.
+            return
+
         # If the user is speaking the audio buffer will keep growing.
-        self._audio_buffer += frame.audio
+        self._audio_buffer += audio
 
         # If the user is not speaking we keep just a little bit of audio.
         if not self._user_speaking and len(self._audio_buffer) > self._audio_buffer_size_1s:

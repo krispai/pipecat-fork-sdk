@@ -21,6 +21,7 @@ class MockVADAnalyzer(VADAnalyzer):
         """Initialize with default QUIET state."""
         super().__init__(sample_rate=16000)
         self._next_state = VADState.QUIET
+        self.received_buffers: list[bytes] = []
 
     def set_next_state(self, state: VADState):
         """Set the state to return on the next analyze_audio call.
@@ -37,7 +38,8 @@ class MockVADAnalyzer(VADAnalyzer):
         return 0.9
 
     async def analyze_audio(self, buffer: bytes) -> VADState:
-        """Return the configured state."""
+        """Record the buffer received and return the configured state."""
+        self.received_buffers.append(buffer)
         return self._next_state
 
 
@@ -205,6 +207,44 @@ class TestVADController(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(broadcast_calls[0][0], SpeechControlParamsFrame)
         self.assertIn("vad_params", broadcast_calls[0][1])
         self.assertIsInstance(broadcast_calls[0][1]["vad_params"], VADParams)
+
+    async def test_analyzes_filtered_audio_when_present(self):
+        """Test that VAD analyzes filtered_audio instead of audio when set."""
+        analyzer = MockVADAnalyzer()
+        controller = VADController(analyzer)
+
+        raw = b"\x01" * 1024
+        filtered = b"\x02" * 1024
+        audio_frame = InputAudioRawFrame(audio=raw, sample_rate=16000, num_channels=1)
+        audio_frame.filtered_audio = filtered
+
+        await controller.process_frame(audio_frame)
+
+        self.assertEqual(analyzer.received_buffers, [filtered])
+
+    async def test_analyzes_raw_audio_when_no_filter(self):
+        """Test that VAD analyzes audio directly when filtered_audio is not set."""
+        analyzer = MockVADAnalyzer()
+        controller = VADController(analyzer)
+
+        raw = b"\x01" * 1024
+        audio_frame = InputAudioRawFrame(audio=raw, sample_rate=16000, num_channels=1)
+
+        await controller.process_frame(audio_frame)
+
+        self.assertEqual(analyzer.received_buffers, [raw])
+
+    async def test_skips_analysis_while_filter_buffering(self):
+        """Test that VAD skips analysis when filtered_audio is empty (filter buffering)."""
+        analyzer = MockVADAnalyzer()
+        controller = VADController(analyzer)
+
+        audio_frame = InputAudioRawFrame(audio=b"\x01" * 1024, sample_rate=16000, num_channels=1)
+        audio_frame.filtered_audio = b""
+
+        await controller.process_frame(audio_frame)
+
+        self.assertEqual(analyzer.received_buffers, [])
 
 
 AUDIO_IDLE_TIMEOUT = 0.1

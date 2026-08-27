@@ -201,8 +201,17 @@ class TurnAnalyzerUserTurnStopStrategy(BaseUserTurnStopStrategy):
         await self.broadcast_frame(SpeechControlParamsFrame, turn_params=self._turn_analyzer.params)
 
     async def _handle_input_audio(self, frame: InputAudioRawFrame):
-        """Handle input audio to check if the turn is completed."""
-        state = self._turn_analyzer.append_audio(frame.audio, self._vad_user_speaking)
+        """Handle input audio to check if the turn is completed.
+
+        Uses `frame.analysis_audio`, which prefers filtered audio (from the
+        input transport's `audio_in_filter`, if any) over raw audio.
+        """
+        audio = frame.analysis_audio
+        if audio is None:
+            # The filter is still buffering; nothing to analyze yet.
+            return
+
+        state = self._turn_analyzer.append_audio(audio, self._vad_user_speaking)
 
         # Streaming analyzers (e.g. KrispVivaTurn) detect turn completion
         # frame-by-frame inside append_audio, so COMPLETE is returned here
