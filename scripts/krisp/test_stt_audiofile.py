@@ -152,14 +152,23 @@ async def transcribe_file(args) -> None:
     # override with --wait-secs if your provider is slower still.
     wait_secs = args.wait_secs if args.wait_secs is not None else max(5.0, duration_secs)
 
-    filter_note = (
-        f", STT use_filtered_audio={args.use_filtered_audio}"
-        if audio_filter
-        else " (use_filtered_audio has no effect: no --filter configured)"
+    # STT only ever reads frame.filtered_audio (Krisp output) when BOTH a
+    # filter is configured AND use_filtered_audio is True. Any other
+    # combination means STT transcribes frame.audio, i.e. the ORIGINAL,
+    # untouched signal -- identical bytes whether or not a filter is even
+    # configured, since the filter never modifies frame.audio.
+    stt_hears_filtered = bool(audio_filter) and args.use_filtered_audio
+    stt_audio_label = (
+        "FILTERED (Krisp-processed)" if stt_hears_filtered else "ORIGINAL (unfiltered)"
     )
+
+    print(f"\n{'=' * 70}")
+    print(f"Krisp filter configured : {'yes' if audio_filter else 'no'}")
+    print(f"STT use_filtered_audio  : {args.use_filtered_audio}")
+    print(f"==> STT will transcribe : {stt_audio_label} audio")
+    print(f"{'=' * 70}")
     print(
-        f"\nFeeding {len(audio_frames)} chunks ({duration_secs:.2f}s) through "
-        f"{'a Krisp-filtered' if audio_filter else 'an unfiltered'} transport{filter_note}, "
+        f"\nFeeding {len(audio_frames)} chunks ({duration_secs:.2f}s), "
         f"waiting up to {wait_secs:.1f}s for STT to finish...\n"
     )
 
@@ -194,7 +203,7 @@ async def transcribe_file(args) -> None:
             print(f"STT error: {err.error}")
 
     text = " ".join(f.text for f in received_down if isinstance(f, TranscriptionFrame))
-    print("Transcript:")
+    print(f"Transcript (STT heard {stt_audio_label} audio):")
     print(text or "(empty)")
 
 
