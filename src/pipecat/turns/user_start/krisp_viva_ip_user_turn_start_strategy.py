@@ -193,7 +193,9 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
         triggers a user turn if the interruption probability exceeds the
         threshold.
         On ``BotStartedSpeakingFrame``, marks the bot as speaking.
-        On ``BotStoppedSpeakingFrame``, clears it and resets the candidate state.
+        On ``BotStoppedSpeakingFrame``, clears it; if the user is still speaking
+        with no decision made yet, starts the user turn, otherwise resets the
+        candidate state.
         On ``VADUserStoppedSpeakingFrame``, resets the candidate state.
 
         Args:
@@ -209,8 +211,7 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            self._bot_speaking = False
-            return await self._handle_reset(frame)
+            return await self._handle_bot_stopped(frame)
         elif isinstance(frame, VADUserStoppedSpeakingFrame):
             return await self._handle_reset(frame)
 
@@ -301,6 +302,26 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
                 return ProcessFrameResult.STOP
 
         return ProcessFrameResult.CONTINUE
+
+    async def _handle_bot_stopped(self, frame: BotStoppedSpeakingFrame) -> ProcessFrameResult:
+        """Handle the bot finishing its speech.
+
+        VAD does not fire again for speech already in progress, so a user who is
+        still speaking when the bot stops, with no decision made yet, starts a
+        turn here: with the bot silent there is nothing left to classify.
+
+        Args:
+            frame: The bot-stopped frame.
+
+        Returns:
+            STOP if a user turn was triggered, otherwise CONTINUE.
+        """
+        self._bot_speaking = False
+        if self._speech_active and not self._decision_made:
+            self._decision_made = True
+            await self.trigger_user_turn_started()
+            return ProcessFrameResult.STOP
+        return await self._handle_reset(frame)
 
     async def _handle_reset(
         self, frame: VADUserStoppedSpeakingFrame | BotStoppedSpeakingFrame

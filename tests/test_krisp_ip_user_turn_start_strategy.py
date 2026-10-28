@@ -190,6 +190,8 @@ class TestKrispVivaIPUserTurnStartStrategy(unittest.IsolatedAsyncioTestCase):
             self.mock_ip_session.process.reset_mock()
 
             await strategy.process_frame(BotStoppedSpeakingFrame())
+            # The user turn controller resets the strategy once the turn starts.
+            await strategy.handle_user_turn_started()
             result = await strategy.process_frame(self._audio_frame())
 
             self.assertEqual(result, ProcessFrameResult.CONTINUE)
@@ -277,6 +279,60 @@ class TestKrispVivaIPUserTurnStartStrategy(unittest.IsolatedAsyncioTestCase):
         try:
             with self.assertRaisesRegex(RuntimeError, "bot_speaking"):
                 await strategy.process_frame(self._audio_frame())
+        finally:
+            await strategy.cleanup()
+
+    async def test_bot_stops_while_user_still_speaking_triggers_turn(self):
+        self.mock_ip_session.process = MagicMock(return_value=0.1)
+
+        strategy = self._make_strategy()
+        try:
+            count = 0
+
+            @strategy.event_handler("on_user_turn_started")
+            async def on_user_turn_started(strategy, params):
+                nonlocal count
+                count += 1
+
+            await strategy.process_frame(BotStartedSpeakingFrame())
+            await strategy.process_frame(VADUserStartedSpeakingFrame())
+            await strategy.process_frame(self._audio_frame())
+            self.assertEqual(count, 0)
+
+            result = await strategy.process_frame(BotStoppedSpeakingFrame())
+
+            self.assertEqual(count, 1)
+            self.assertEqual(result, ProcessFrameResult.STOP)
+        finally:
+            await strategy.cleanup()
+
+    async def test_bot_stops_after_interruption_does_not_trigger_twice(self):
+        self.mock_ip_session.process = MagicMock(return_value=0.9)
+
+        strategy = self._make_strategy()
+        try:
+            count = 0
+
+            @strategy.event_handler("on_user_turn_started")
+            async def on_user_turn_started(strategy, params):
+                nonlocal count
+                count += 1
+
+            await strategy.process_frame(BotStartedSpeakingFrame())
+            await strategy.process_frame(VADUserStartedSpeakingFrame())
+            await strategy.process_frame(self._audio_frame())
+            await strategy.process_frame(BotStoppedSpeakingFrame())
+
+            self.assertEqual(count, 1)
+        finally:
+            await strategy.cleanup()
+
+    async def test_bot_stops_without_user_speech_does_not_trigger(self):
+        strategy = self._make_strategy()
+        try:
+            result = await strategy.process_frame(BotStartedSpeakingFrame())
+            result = await strategy.process_frame(BotStoppedSpeakingFrame())
+            self.assertEqual(result, ProcessFrameResult.CONTINUE)
         finally:
             await strategy.cleanup()
 
