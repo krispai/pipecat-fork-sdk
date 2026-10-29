@@ -74,6 +74,11 @@ from pipecat.workers.runner import WorkerRunner
 
 load_dotenv(override=True)
 
+# LOCAL ONLY (do not commit): run against Krisp staging.
+KRISP_STAGE_REST = "https://stage-api.developers.krisp.ai"
+KRISP_STAGE_WS = "wss://stage.streaming.krisp.ai"
+KRISP_STT_MODEL = "krisp-stt-v1-preview/prometheus-3-2-agents-pre"
+
 # Krisp STT decides when the user interrupts the bot. The bot's words are fed
 # back to it by the BotSpokenWordsProcessor at the end of the pipeline.
 INTERRUPTION_PREDICTION = True
@@ -143,7 +148,9 @@ async def set_voice_isolation(params: FunctionCallParams):
 
 def _audio_in_filter() -> KrispVivaApiFilter:
     global _audio_filter
-    _audio_filter = KrispVivaApiFilter()
+    _audio_filter = KrispVivaApiFilter(
+        url=f"{KRISP_STAGE_WS}/voice-isolation", rest_base_url=KRISP_STAGE_REST
+    )
     return _audio_filter
 
 
@@ -240,7 +247,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     stt = KrispSTTService(
         api_key=os.environ["KRISP_API_KEY"],
+        url=f"{KRISP_STAGE_WS}/stt",
         settings=KrispSTTService.Settings(
+            model=KRISP_STT_MODEL,
             interruption_prediction=INTERRUPTION_PREDICTION,
             # A slightly more willing model than the server default (0.97),
             # and a longer overlap fallback than its 1000 ms: short overlaps
@@ -249,10 +258,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             interruption_max_overlap_ms=1500,
             **VOICE_ISOLATION_MODES[VOICE_ISOLATION_MODE],
         ),
+        rest_base_url=KRISP_STAGE_REST,
     )
 
     tts = KrispTTSService(
         api_key=os.environ["KRISP_API_KEY"],
+        url=f"{KRISP_STAGE_WS}/tts",
+        rest_base_url=KRISP_STAGE_REST,
         settings=KrispTTSService.Settings(voice="Amy", language="en-US"),
     )
 

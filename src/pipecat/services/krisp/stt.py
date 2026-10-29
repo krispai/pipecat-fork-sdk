@@ -72,7 +72,7 @@ from pipecat.utils.time import time_now_iso8601
 from pipecat.utils.tracing.service_decorators import traced_stt
 from pipecat.utils.types import NOT_GIVEN, NotGiven
 
-KRISP_STT_URL = "wss://streaming.krisp.ai/stt"
+KRISP_STT_URL = "wss://stage.streaming.krisp.ai/stt"
 
 # The API accepts 16 kHz mono PCM only.
 KRISP_STT_SAMPLE_RATE = 16000

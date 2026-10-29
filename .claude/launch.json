@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "krisp-viva-api-bot",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "examples/voice/voice-krisp-viva-api.py",
+        "--port",
+        "7860"
+      ],
+      "port": 7860
+    }
+  ]
+}
