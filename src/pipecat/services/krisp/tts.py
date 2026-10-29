@@ -10,10 +10,25 @@ Krisp's TTS WebSocket synthesizes ``text`` messages as they arrive and streams
 untagged 24 kHz PCM. The server answers every ``text`` message with one
 ``end_of_sentence`` once its audio has been sent, which is how the service knows
 a turn's audio is complete.
+
+Word timing comes from the server: with ``word_label_exporting`` in the
+handshake it sends, before each word's audio, an ``info`` message naming the
+word and how many seconds of the sentence's audio precede it::
+
+    {"type": "info", "generating_word": "there", "generated_audio_length_second": 0.4}
+
+Each one times the next word of the sentence text as it arrives, so the
+word's ``TTSTextFrame`` is queued ahead of its audio and the pipeline learns
+of the word the moment it plays. Times restart at zero for every sentence.
+The reported words are normalized (punctuation dropped, numbers spelled out),
+so the sentence's own words are used in order instead; words the server
+didn't report, or a whole sentence without ``info`` messages, are spread over
+the remaining audio in proportion to their length when the sentence ends.
 """
 
 import asyncio
 import json
+from collections import deque
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,6 +40,7 @@ from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     ErrorFrame,
     Frame,
+    InterruptionFrame,
     TTSAudioRawFrame,
     TTSStoppedFrame,
 )
@@ -35,7 +51,8 @@ from pipecat.services.krisp.common import (
     connect_session,
 )
 from pipecat.services.settings import TTSSettings
-from pipecat.services.tts_service import InterruptibleTTSService
+from pipecat.services.tts_service import InterruptibleTTSService, TTSService
+from pipecat.services.websocket_service import WebsocketService
 from pipecat.transcriptions.language import Language, resolve_language
 from pipecat.utils.tracing.service_decorators import traced_tts
 from pipecat.utils.types import NOT_GIVEN, NotGiven
@@ -48,6 +65,10 @@ KRISP_TTS_SAMPLE_RATE = 24000
 # Longest pause between sentences of one reply (e.g. a slow LLM) that keeps the
 # reply open; after it, the base idle timeout ends the reply.
 _MAX_SENTENCE_GAP_SECS = 15.0
+
+# Waits between connection attempts while the server reports
+# ``capacity_exhausted`` ("retry shortly"): about half a minute in all.
+_CAPACITY_RETRY_DELAYS_SECS = (2, 3, 5, 8, 13)
 
 
 def language_to_krisp_tts_language(language: Language) -> str:
@@ -73,6 +94,30 @@ def language_to_krisp_tts_language(language: Language) -> str:
         Language.RU_RU: "ru-RU",
     }
     return resolve_language(language, LANGUAGE_MAP, use_base_code=False)
+
+
+def estimate_word_times(text: str, start: float, duration: float) -> list[tuple[str, float]]:
+    """Spread a sentence's words over its audio in proportion to their length.
+
+    Args:
+        text: The sentence as sent to the TTS.
+        start: Seconds into the context's audio at which the sentence starts.
+        duration: Seconds of audio the sentence produced.
+
+    Returns:
+        ``(word, seconds)`` pairs, one per whitespace-separated word.
+    """
+    words = text.split()
+    if not words:
+        return []
+    # Each word is weighted by its characters plus the space that follows it.
+    total = sum(len(w) + 1 for w in words)
+    word_times = []
+    elapsed = 0
+    for word in words:
+        word_times.append((word, start + duration * elapsed / total))
+        elapsed += len(word) + 1
+    return word_times
 
 
 @dataclass
@@ -129,9 +174,12 @@ class KrispTTSService(InterruptibleTTSService):
 
         # pause_frame_processing: audio carries no context ID, so the next
         # reply's text waits until the previous reply has finished playing.
+        # push_text_frames=False: text frames come from the estimated word
+        # timestamps instead of being pushed per sentence.
         super().__init__(
             push_start_frame=True,
             push_stop_frames=True,
+            push_text_frames=False,
             pause_frame_processing=True,
             sample_rate=KRISP_TTS_SAMPLE_RATE,
             settings=default_settings,
@@ -160,6 +208,22 @@ class KrispTTSService(InterruptibleTTSService):
         # Set when a settings change arrives while the bot is speaking; the
         # reconnect that applies it waits until the bot stops.
         self._reconnect_after_turn = False
+        # Reconnect running in the background (after an interruption, or
+        # while the server is at capacity); ``run_tts`` waits for it instead
+        # of opening a second session.
+        self._reconnect_task: asyncio.Task | None = None
+        self._waiting_for_capacity = False
+        # Sentences awaiting their ``end_of_sentence``, in the order sent, with
+        # the audio bytes received for the one at the head; and the seconds of
+        # audio already received for each context, which is where the next
+        # sentence's words start.
+        self._sentences: deque[tuple[str, str]] = deque()
+        self._sentence_audio_bytes = 0
+        # For the sentence at the head: how many of its words have been
+        # timed from the server's ``info`` messages, and the last time seen.
+        self._sentence_words_timed = 0
+        self._sentence_last_time = 0.0
+        self._context_audio_secs: dict[str, float] = {}
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -241,9 +305,59 @@ class KrispTTSService(InterruptibleTTSService):
         if self._websocket and not self._receive_task:
             self._receive_task = self.create_task(self._receive_task_handler(self._report_error))
 
+    async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
+        """Drop the session at once and reconnect in the background.
+
+        The interruption frame only reaches the output transport, which stops
+        the bot's audio, after this returns. Closing the socket and completing
+        a new handshake can take seconds, so neither is awaited here.
+        """
+        should_reconnect = self._bot_speaking or self._tts_started
+        self._tts_started = False
+        await TTSService._handle_interruption(self, frame, direction)
+        if should_reconnect:
+            await self._drop_session()
+            self._reconnect_task = self.create_task(self._connect())
+
+    async def _drop_session(self):
+        """Tear the session down without waiting for the server.
+
+        The socket is closed in a background task; everything the session
+        was doing is forgotten immediately.
+        """
+        await WebsocketService._disconnect(self)
+        if self._receive_task:
+            await self.cancel_task(self._receive_task)
+            self._receive_task = None
+        await self._cancel_gap_task()
+        websocket, self._websocket = self._websocket, None
+        self._pending_texts = 0
+        self._sentences.clear()
+        self._sentence_audio_bytes = 0
+        self._reset_sentence_timing()
+        self._text_done_contexts.clear()
+        self._contexts_with_audio.clear()
+        await self.remove_active_audio_context()
+        self._flushed_context_id = None
+        if websocket is not None:
+            self.create_task(self._close_websocket(websocket))
+        await self._call_event_handler("on_disconnected")
+
+    async def _close_websocket(self, websocket):
+        try:
+            if websocket.state is State.OPEN:
+                logger.debug("Disconnecting from Krisp TTS")
+                await websocket.send(json.dumps({"type": "end"}))
+                await websocket.close()
+        except Exception as e:
+            logger.debug(f"{self}: error closing websocket: {e}")
+
     async def _disconnect(self):
         await super()._disconnect()
 
+        if self._reconnect_task:
+            await self.cancel_task(self._reconnect_task)
+            self._reconnect_task = None
         if self._receive_task:
             await self.cancel_task(self._receive_task)
             self._receive_task = None
@@ -261,6 +375,8 @@ class KrispTTSService(InterruptibleTTSService):
         handshake: dict[str, Any] = {
             "model": self._settings.model,
             "voice": self._settings.voice,
+            # Per-word ``info`` messages, which time the TTSTextFrames.
+            "word_label_exporting": True,
         }
         if self._settings.language:
             handshake["language"] = self._settings.language
@@ -287,6 +403,9 @@ class KrispTTSService(InterruptibleTTSService):
             # and the new connection already uses the current settings.
             self._connection_id += 1
             self._pending_texts = 0
+            self._sentences.clear()
+            self._sentence_audio_bytes = 0
+            self._reset_sentence_timing()
             self._reconnect_after_turn = False
             await self._maybe_finish_context()
             if ready.get("warning"):
@@ -296,10 +415,48 @@ class KrispTTSService(InterruptibleTTSService):
                 f"voice={ready.get('voice')}, language={ready.get('language')})"
             )
             await self._call_event_handler("on_connected")
+        except KrispServiceError as e:
+            self._websocket = None
+            if e.code == "capacity_exhausted":
+                if self._waiting_for_capacity:
+                    logger.debug(f"{self}: still at capacity ({e})")
+                    return
+                logger.warning(
+                    f"{self}: {e}; retrying for up to {sum(_CAPACITY_RETRY_DELAYS_SECS)} s"
+                )
+                self._reconnect_task = self.create_task(self._connect_when_capacity_frees())
+                return
+            await self.push_error(error_msg=f"Unable to connect to Krisp TTS: {e}", exception=e)
+            await self._call_event_handler("on_connection_error", f"{e}")
         except Exception as e:
             self._websocket = None
             await self.push_error(error_msg=f"Unable to connect to Krisp TTS: {e}", exception=e)
             await self._call_event_handler("on_connection_error", f"{e}")
+
+    async def _connect_when_capacity_frees(self):
+        """Keep trying to connect while the server is at capacity.
+
+        The server frees a slot when another session ends, so a few spaced
+        attempts usually get through; the reply that is waiting on
+        ``run_tts`` goes out as soon as one does.
+        """
+        self._waiting_for_capacity = True
+        try:
+            for delay in _CAPACITY_RETRY_DELAYS_SECS:
+                await asyncio.sleep(delay)
+                await self._connect()
+                if self._websocket:
+                    logger.info(f"{self}: Krisp TTS capacity freed, connected")
+                    return
+            error = KrispServiceError(
+                f"Krisp TTS stayed at capacity for {sum(_CAPACITY_RETRY_DELAYS_SECS)} s",
+                code="capacity_exhausted",
+                status_code=503,
+            )
+            await self.push_error(error_msg=str(error), exception=error)
+            await self._call_event_handler("on_connection_error", str(error))
+        finally:
+            self._waiting_for_capacity = False
 
     async def _disconnect_websocket(self):
         try:
@@ -345,6 +502,7 @@ class KrispTTSService(InterruptibleTTSService):
         await self._cancel_gap_task()
         self._text_done_contexts.discard(context_id)
         self._contexts_with_audio.discard(context_id)
+        self._context_audio_secs.pop(context_id, None)
         await super().on_audio_context_interrupted(context_id)
 
     async def on_audio_context_completed(self, context_id: str):
@@ -361,6 +519,7 @@ class KrispTTSService(InterruptibleTTSService):
         got_audio = context_id in self._contexts_with_audio
         self._text_done_contexts.discard(context_id)
         self._contexts_with_audio.discard(context_id)
+        self._context_audio_secs.pop(context_id, None)
         if text_done and not got_audio:
             logger.warning(f"{self}: Krisp TTS produced no audio for a reply; reconnecting")
             await self._abandon_session()
@@ -383,10 +542,14 @@ class KrispTTSService(InterruptibleTTSService):
     async def _end_reply(self, context_id: str | None):
         """End a reply now: its remaining texts will never be answered."""
         self._pending_texts = 0
+        self._sentences.clear()
+        self._sentence_audio_bytes = 0
+        self._reset_sentence_timing()
         self._flushed_context_id = None
         if context_id:
             self._text_done_contexts.discard(context_id)
             self._contexts_with_audio.discard(context_id)
+            self._context_audio_secs.pop(context_id, None)
         if context_id and self.audio_context_available(context_id):
             await self.append_to_audio_context(context_id, TTSStoppedFrame(context_id=context_id))
             await self.remove_audio_context(context_id)
@@ -422,6 +585,7 @@ class KrispTTSService(InterruptibleTTSService):
     async def _receive_messages(self):
         async for message in self._get_websocket():
             if isinstance(message, bytes):
+                self._sentence_audio_bytes += len(message)
                 context_id = self.get_active_audio_context_id()
                 if context_id and self.audio_context_available(context_id):
                     self._contexts_with_audio.add(context_id)
@@ -436,8 +600,13 @@ class KrispTTSService(InterruptibleTTSService):
 
             msg = json.loads(message)
             msg_type = msg.get("type")
-            if msg_type == "end_of_sentence":
+            if msg_type == "info" and "generating_word" in msg:
+                seconds = msg.get("generated_audio_length_second")
+                if isinstance(seconds, (int, float)):
+                    await self._time_next_word(seconds)
+            elif msg_type == "end_of_sentence":
                 self._pending_texts = max(0, self._pending_texts - 1)
+                await self._add_sentence_word_timestamps()
                 await self._maybe_finish_context()
                 context_id = self.get_active_audio_context_id()
                 if (
@@ -457,7 +626,8 @@ class KrispTTSService(InterruptibleTTSService):
                 await self._abandon_session()
                 await self._end_reply(self.get_active_audio_context_id())
                 return
-            # "all_processed", "info" and "Done" carry nothing the service needs.
+            # "all_processed", "Done" and other "info" messages carry nothing
+            # the service needs.
 
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
@@ -471,12 +641,15 @@ class KrispTTSService(InterruptibleTTSService):
             None on success (audio arrives on the receive task), or an
             ``ErrorFrame`` and ``TTSStoppedFrame`` on failure.
         """
+        if self._reconnect_task and not self._reconnect_task.done():
+            await self._reconnect_task
         if not self._websocket or self._websocket.state is State.CLOSED:
             await self._connect()
 
         # Counted before sending: the receive task can run while the send yields.
         connection_id = self._connection_id
         self._pending_texts += 1
+        self._sentences.append((context_id, text))
         try:
             await self.send_with_retry(
                 json.dumps({"type": "text", "text": text}), self._report_error
@@ -486,11 +659,69 @@ class KrispTTSService(InterruptibleTTSService):
             if self._connection_id != connection_id:
                 # Reconnected during the send: only the resent text is in flight.
                 self._pending_texts = 1
+                self._sentences.clear()
+                self._sentences.append((context_id, text))
             await self.start_tts_usage_metrics(text)
         except Exception as e:
             if self._connection_id == connection_id:
                 self._pending_texts = max(0, self._pending_texts - 1)
+                self._remove_sentence(context_id, text)
             yield ErrorFrame(error=f"Krisp TTS send failed: {e}")
             yield TTSStoppedFrame(context_id=context_id)
             return
         yield None
+
+    def _remove_sentence(self, context_id: str, text: str):
+        for i in range(len(self._sentences) - 1, -1, -1):
+            if self._sentences[i] == (context_id, text):
+                del self._sentences[i]
+                return
+
+    def _reset_sentence_timing(self):
+        self._sentence_words_timed = 0
+        self._sentence_last_time = 0.0
+
+    async def _time_next_word(self, seconds: float):
+        """Time the next word of the head sentence at the offset the server reported.
+
+        Reported words beyond the sentence's own word count (a word the
+        server split) have nothing left to time and are ignored.
+        """
+        self._sentence_last_time = seconds
+        if not self._sentences:
+            return
+        context_id, text = self._sentences[0]
+        words = text.split()
+        index = self._sentence_words_timed
+        if index >= len(words) or not self.audio_context_available(context_id):
+            return
+        self._sentence_words_timed = index + 1
+        start = self._context_audio_secs.get(context_id, 0.0)
+        await self.add_word_timestamps([(words[index], start + seconds)], context_id)
+
+    async def _add_sentence_word_timestamps(self):
+        """Finish timing the sentence whose audio just completed.
+
+        Words the server didn't report (a sentence without ``info``
+        messages, or words it merged) are spread over the audio that follows
+        the last reported word, in proportion to their length.
+        """
+        audio_bytes, self._sentence_audio_bytes = self._sentence_audio_bytes, 0
+        timed, last_time = self._sentence_words_timed, self._sentence_last_time
+        self._reset_sentence_timing()
+        if not self._sentences:
+            return
+        context_id, text = self._sentences.popleft()
+        if not self.audio_context_available(context_id):
+            return
+        duration = audio_bytes / (self.sample_rate * 2)
+        start = self._context_audio_secs.get(context_id, 0.0)
+        self._context_audio_secs[context_id] = start + duration
+        remaining = text.split()[timed:]
+        if remaining:
+            # Words with no reported time start after the last timed word.
+            from_time = last_time if timed else 0.0
+            word_times = estimate_word_times(
+                " ".join(remaining), start + from_time, max(0.0, duration - from_time)
+            )
+            await self.add_word_timestamps(word_times, context_id)

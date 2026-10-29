@@ -5,6 +5,7 @@
 #
 
 from .base_user_turn_start_strategy import BaseUserTurnStartStrategy, UserTurnStartedParams
+from .bot_silent_user_turn_start_strategy import BotSilentUserTurnStartStrategy
 from .external_user_turn_start_strategy import ExternalUserTurnStartStrategy
 from .min_words_user_turn_start_strategy import MinWordsUserTurnStartStrategy
 from .transcription_user_turn_start_strategy import TranscriptionUserTurnStartStrategy
@@ -18,6 +19,7 @@ except ImportError:
 
 __all__ = [
     "BaseUserTurnStartStrategy",
+    "BotSilentUserTurnStartStrategy",
     "ExternalUserTurnStartStrategy",
     "KrispVivaIPUserTurnStartStrategy",
     "MinWordsUserTurnStartStrategy",

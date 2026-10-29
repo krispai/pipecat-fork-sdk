@@ -1540,6 +1540,24 @@ class BotStartedSpeakingFrame(SystemFrame):
 
 
 @dataclass
+class BotSpokenWordsFrame(SystemFrame):
+    """Frame reporting words the bot has just said, with the time each was heard.
+
+    Pushed upstream from the end of the pipeline (see
+    :class:`~pipecat.processors.bot_spoken_words_processor.BotSpokenWordsProcessor`)
+    so that a service ahead of the TTS can follow the bot's speech. An STT
+    service with server-side interruption detection forwards them to its
+    provider, which then knows when the bot is talking and what it is saying.
+
+    Parameters:
+        words: ``(text, timestamp)`` pairs, the timestamp being the pipeline
+            clock time in nanoseconds at which the word was played.
+    """
+
+    words: list[tuple[str, int]]
+
+
+@dataclass
 class BotStoppedSpeakingFrame(SystemFrame):
     """Frame indicating the bot stopped speaking.
 
