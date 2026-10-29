@@ -27,6 +27,7 @@ from pipecat.audio.krisp_instance import (
     int_to_krisp_sample_rate,
 )
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
     Frame,
     InputAudioRawFrame,
@@ -123,6 +124,10 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
         self._speech_active = False
         self._audio_buffer = bytearray()
         self._decision_made = False
+        self._bot_speaking = False
+        # krisp_audio 1.14 added a bot-speaking argument to ``IpFloat.process``;
+        # cleared on the first call if the installed SDK predates it.
+        self._ip_takes_bot_speaking = True
 
         # Acquire SDK
         try:
@@ -182,7 +187,9 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
         triggers a user turn if the interruption probability exceeds the
         threshold.
         On ``VADUserStoppedSpeakingFrame`` or ``BotStoppedSpeakingFrame``,
-        resets the candidate state.
+        resets the candidate state. ``BotStartedSpeakingFrame`` and
+        ``BotStoppedSpeakingFrame`` also track whether the bot is speaking,
+        which the IP model takes as input.
 
         Args:
             frame: The incoming frame.
@@ -190,11 +197,15 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
         Returns:
             STOP if a genuine interruption was detected, CONTINUE otherwise.
         """
-        if isinstance(frame, VADUserStartedSpeakingFrame):
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
             return await self._handle_vad_started(frame)
         elif isinstance(frame, InputAudioRawFrame):
             return await self._handle_audio(frame)
         elif isinstance(frame, (VADUserStoppedSpeakingFrame, BotStoppedSpeakingFrame)):
+            if isinstance(frame, BotStoppedSpeakingFrame):
+                self._bot_speaking = False
             return await self._handle_reset(frame)
 
         return ProcessFrameResult.CONTINUE
@@ -253,7 +264,7 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
         frames = audio_float32.reshape(-1, self._samples_per_frame)
 
         for ip_frame in frames:
-            ip_prob = self._ip_session.process(ip_frame, self._speech_active)
+            ip_prob = self._process_ip_frame(ip_frame)
 
             if self._speech_active and not self._decision_made and ip_prob >= self._threshold:
                 logger.debug(
@@ -265,6 +276,15 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
                 return ProcessFrameResult.STOP
 
         return ProcessFrameResult.CONTINUE
+
+    def _process_ip_frame(self, ip_frame: np.ndarray) -> float:
+        assert self._ip_session is not None
+        if self._ip_takes_bot_speaking:
+            try:
+                return self._ip_session.process(ip_frame, self._speech_active, self._bot_speaking)
+            except TypeError:
+                self._ip_takes_bot_speaking = False
+        return self._ip_session.process(ip_frame, self._speech_active)
 
     async def _handle_reset(
         self, frame: VADUserStoppedSpeakingFrame | BotStoppedSpeakingFrame

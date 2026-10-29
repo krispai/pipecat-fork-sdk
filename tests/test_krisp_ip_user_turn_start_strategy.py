@@ -248,6 +248,40 @@ class TestKrispVivaIPUserTurnStartStrategy(unittest.IsolatedAsyncioTestCase):
         finally:
             await strategy.cleanup()
 
+    async def test_bot_speaking_state_passed_to_model(self):
+        self.mock_ip_session.process = MagicMock(return_value=0.1)
+
+        strategy = self._make_strategy(threshold=0.5)
+        try:
+            await strategy.process_frame(self._audio_frame())
+            self.assertFalse(self.mock_ip_session.process.call_args[0][2])
+
+            await strategy.process_frame(BotStartedSpeakingFrame())
+            await strategy.process_frame(self._audio_frame())
+            self.assertTrue(self.mock_ip_session.process.call_args[0][2])
+
+            await strategy.process_frame(BotStoppedSpeakingFrame())
+            await strategy.process_frame(self._audio_frame())
+            self.assertFalse(self.mock_ip_session.process.call_args[0][2])
+        finally:
+            await strategy.cleanup()
+
+    async def test_falls_back_to_two_argument_process(self):
+        def legacy_process(frame, voice_detected):
+            return 0.87
+
+        self.mock_ip_session.process = MagicMock(side_effect=legacy_process)
+
+        strategy = self._make_strategy(threshold=0.5)
+        try:
+            await strategy.process_frame(VADUserStartedSpeakingFrame())
+            result = await strategy.process_frame(self._audio_frame())
+
+            self.assertEqual(result, ProcessFrameResult.STOP)
+            self.assertEqual(len(self.mock_ip_session.process.call_args[0]), 2)
+        finally:
+            await strategy.cleanup()
+
     async def test_unrelated_frames_continue(self):
         strategy = self._make_strategy()
         try:
