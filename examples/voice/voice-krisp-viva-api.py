@@ -86,7 +86,7 @@ INTERRUPTION_PREDICTION = True
 # silent. Without it, Krisp's first partial transcript opens the turn (about
 # a second later) and there are no local false starts on noise. End of turn
 # and interruptions come from Krisp either way.
-USE_SILERO_VAD = os.getenv("USE_SILERO_VAD", "1") not in ("0", "false", "False")
+USE_SILERO_VAD = os.getenv("USE_SILERO_VAD", "0") not in ("0", "false", "False")
 # Whose voice the bot hears:
 # - "primary": only the main speaker. The VIVA filter removes other voices and
 #   noise from the audio, and STT drops any background words it still labels.
