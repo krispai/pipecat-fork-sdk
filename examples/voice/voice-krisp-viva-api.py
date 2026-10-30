@@ -107,8 +107,8 @@ VOICE_ISOLATION_MODES: dict[str, dict] = {
     # },
     "all": {
         "voice_isolation": True,
-        "voice_isolation_output": "all_voices",
-        "keep_background_words": False,
+        "voice_isolation_output": "all_voices",  # or "primary_only"
+        "keep_background_words": True,
     },
 }
 if VOICE_ISOLATION_MODE not in VOICE_ISOLATION_MODES:
