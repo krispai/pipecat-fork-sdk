@@ -330,7 +330,7 @@ class TestKrispVivaIPUserTurnStartStrategy(unittest.IsolatedAsyncioTestCase):
     async def test_bot_stops_without_user_speech_does_not_trigger(self):
         strategy = self._make_strategy()
         try:
-            result = await strategy.process_frame(BotStartedSpeakingFrame())
+            await strategy.process_frame(BotStartedSpeakingFrame())
             result = await strategy.process_frame(BotStoppedSpeakingFrame())
             self.assertEqual(result, ProcessFrameResult.CONTINUE)
         finally:

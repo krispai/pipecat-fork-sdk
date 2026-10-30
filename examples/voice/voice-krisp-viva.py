@@ -17,8 +17,7 @@ Required environment variables:
 - KRISP_VIVA_TURN_MODEL_PATH: Path to the Krisp turn detection model file (.kef)
 - KRISP_VIVA_IP_MODEL_PATH: Path to the Krisp IP model file (.kef)
 - KRISP_VIVA_VAD_MODEL_PATH: Path to the Krisp VAD model file (.kef)
-- DEEPGRAM_API_KEY: Deepgram API key for STT
-- CARTESIA_API_KEY: Cartesia API key for TTS
+- DEEPGRAM_API_KEY: Deepgram API key for STT and TTS
 - OPENAI_API_KEY: OpenAI API key for LLM
 
 Optional environment variables:
