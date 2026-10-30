@@ -251,11 +251,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         settings=KrispSTTService.Settings(
             model=KRISP_STT_MODEL,
             interruption_prediction=INTERRUPTION_PREDICTION,
-            # A slightly more willing model than the server default (0.97),
-            # and a longer overlap fallback than its 1000 ms: short overlaps
-            # fired on noise and hung the turn.
-            interruption_sensitivity=0.9,
-            interruption_max_overlap_ms=1500,
             **VOICE_ISOLATION_MODES[VOICE_ISOLATION_MODE],
         ),
         rest_base_url=KRISP_STAGE_REST,

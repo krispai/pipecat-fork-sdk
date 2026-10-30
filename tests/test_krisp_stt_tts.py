@@ -333,13 +333,43 @@ async def test_stt_connect_creates_stt_token_and_sends_handshake(monkeypatch):
         "audio_format": "pcm_s16le",
         "turn": {
             "prediction": True,
-            "sensitivity": 0.9,
+            "sensitivity": 0.714,
             "max_silence": 800,
             "silence_validation": 100,
         },
         "interruption": {"prediction": False},
         "vocabulary": ["Krisp"],
         "language_hints": ["hy"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_stt_handshake_uses_recommended_turn_and_interruption_defaults(monkeypatch):
+    monkeypatch.setattr(krisp_common, "create_session_token", AsyncMock(return_value="tok"))
+    captured = {}
+
+    async def fake_connect(url, **kwargs):
+        captured["ws"] = _FakeWebsocket([{"type": "ready", "request_id": "r"}])
+        return captured["ws"]
+
+    monkeypatch.setattr("pipecat.services.websocket_service.websocket_connect", fake_connect)
+    service = KrispSTTService(
+        api_key="master", settings=KrispSTTService.Settings(interruption_prediction=True)
+    )
+
+    await service._connect_websocket()
+
+    (handshake,) = _sent_json(captured["ws"])
+    assert handshake["turn"] == {
+        "prediction": True,
+        "sensitivity": 0.714,
+        "max_silence": 3000,
+        "silence_validation": 100,
+    }
+    assert handshake["interruption"] == {
+        "prediction": True,
+        "sensitivity": 0.97,
+        "max_overlap": 1200,
     }
 
 

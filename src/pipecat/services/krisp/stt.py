@@ -99,9 +99,11 @@ class KrispSTTSettings(STTSettings):
             user stopped speaking. Turn start and bot interruption are always
             left to pipecat's start strategies.
         turn_sensitivity: End-of-turn sensitivity, 0 (more sensitive) to 1.
+            Defaults to 0.714.
         turn_max_silence_ms: Silence in ms after which the turn ends (400-4000).
+            Defaults to 3000.
         turn_silence_validation_ms: Silence in ms used to validate the
-            turn model's decision (10-1000).
+            turn model's decision (10-1000). Defaults to 100.
         interruption_prediction: Whether the server decides when the user has
             interrupted the bot. Requires ``turn_prediction`` and the bot's
             words, see :class:`KrispSTTService`. When True, the service
@@ -109,10 +111,10 @@ class KrispSTTSettings(STTSettings):
             while the bot speaks.
         interruption_sensitivity: Model confidence needed to report an
             interruption, 0.5 to 1; 1 disables the model and leaves only
-            ``interruption_max_overlap_ms``.
+            ``interruption_max_overlap_ms``. Defaults to 0.97.
         interruption_max_overlap_ms: Overlapping speech in ms after which an
             interruption is reported even if the model hasn't (300-5000, or 0
-            for never).
+            for never). Defaults to 1200.
         voice_isolation: Whether the server labels each word as the primary
             speaker's (``primary``) or a background voice's (``background``).
         voice_isolation_output: ``"all_voices"`` or ``"primary_only"``.
@@ -198,12 +200,12 @@ class KrispSTTService(WebsocketSTTService):
             language=None,
             vocabulary=None,
             turn_prediction=True,
-            turn_sensitivity=0.9,
-            turn_max_silence_ms=2000,
+            turn_sensitivity=0.714,
+            turn_max_silence_ms=3000,
             turn_silence_validation_ms=100,
             interruption_prediction=False,
-            interruption_sensitivity=None,
-            interruption_max_overlap_ms=None,
+            interruption_sensitivity=0.97,
+            interruption_max_overlap_ms=1200,
             voice_isolation=False,
             voice_isolation_output=None,
             keep_background_words=False,
