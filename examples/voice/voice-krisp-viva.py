@@ -115,7 +115,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 start=[KrispVivaIPUserTurnStartStrategy(threshold=0.5)],
                 stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=KrispVivaTurn())],
             ),
-            vad_analyzer=SileroVADAnalyzer(),  # or KrispVivaVadAnalyzer
+            vad_analyzer=KrispVivaVadAnalyzer(),
         ),
     )
 
