@@ -20,10 +20,12 @@ This example demonstrates a conversational bot with:
 Voice isolation has two modes. ``primary`` (default) hears only the main
 speaker: the VIVA filter cleans the audio and STT keeps only primary-speaker
 words. ``all`` hears everyone: the filter is bypassed and STT labels every
-voice; background words go to the log, not to the conversation. When a client connects the bot asks which one to
-use and switches with the ``set_voice_isolation`` tool; it can be changed later
-the same way, by typing ``/voice <mode>`` in the client, or set up front with
-``KRISP_VOICE_ISOLATION``.
+voice; background words go to the log, not to the conversation. When more than
+one mode is available the bot asks which one to use when a client connects and
+switches with the ``set_voice_isolation`` tool; it can be changed later the same
+way, by typing ``/voice <mode>`` in the client, or set up front with
+``KRISP_VOICE_ISOLATION``. Only ``all`` is available while the stage all-voices
+model rejects ``primary_only``.
 
 Required environment variables:
 - KRISP_API_KEY: Krisp API key (session tokens are created from it)
@@ -77,7 +79,7 @@ load_dotenv(override=True)
 # LOCAL ONLY (do not commit): run against Krisp staging.
 KRISP_STAGE_REST = "https://stage-api.developers.krisp.ai"
 KRISP_STAGE_WS = "wss://stage.streaming.krisp.ai"
-KRISP_STT_MODEL = "krisp-stt-v1-preview/prometheus-3-2-agents-pre"
+KRISP_STT_MODEL = "krisp-stt-v1-preview/prometheus-3-2-agents-all-voices-pre"
 
 # Krisp STT decides when the user interrupts the bot. The bot's words are fed
 # back to it by the BotSpokenWordsProcessor at the end of the pipeline.
@@ -93,22 +95,27 @@ USE_SILERO_VAD = os.getenv("USE_SILERO_VAD", "0") not in ("0", "false", "False")
 # - "all": everyone is heard. The VIVA filter is bypassed and STT labels each
 #   word primary or background; background words are logged by the STT
 #   service but still kept out of the conversation.
-# Stage must enable voice isolation for the model for the labels to appear, or
-# the STT log says "transcript words carry no voice labels".
-VOICE_ISOLATION_MODE = os.getenv("KRISP_VOICE_ISOLATION", "primary")
+# The stage all-voices model labels every word; it does not accept the
+# "primary_only" output yet, so the "primary" mode is disabled until it does.
+VOICE_ISOLATION_MODE = os.getenv("KRISP_VOICE_ISOLATION", "all")
 
 VOICE_ISOLATION_MODES: dict[str, dict] = {
-    "primary": {
-        "voice_isolation": True,
-        "voice_isolation_output": "primary_only",
-        "keep_background_words": False,
-    },
+    # "primary": {
+    #     "voice_isolation": True,
+    #     "voice_isolation_output": "primary_only",
+    #     "keep_background_words": False,
+    # },
     "all": {
         "voice_isolation": True,
         "voice_isolation_output": "all_voices",
         "keep_background_words": False,
     },
 }
+if VOICE_ISOLATION_MODE not in VOICE_ISOLATION_MODES:
+    raise SystemExit(
+        f"KRISP_VOICE_ISOLATION={VOICE_ISOLATION_MODE!r} is not available; "
+        f"choose one of: {', '.join(VOICE_ISOLATION_MODES)}"
+    )
 
 # The filter and command processor of the current session, so the mode can
 # be switched while it runs.
@@ -121,7 +128,7 @@ set_voice_isolation_function = FunctionSchema(
     name="set_voice_isolation",
     description=(
         "Set whose voice the assistant hears: 'primary' keeps only the main speaker, "
-        "'all' hears everyone in the room."
+        "'all' hears everyone in the room. Only the modes listed in the enum are available."
     ),
     properties={
         "mode": {
@@ -191,9 +198,8 @@ class VoiceIsolationCommands(FrameProcessor):
                 if mode in VOICE_ISOLATION_MODES:
                     await self.set_mode(mode)
                 else:
-                    await self.push_frame(
-                        TTSSpeakFrame("Say slash voice primary, or slash voice all.")
-                    )
+                    choices = ", or ".join(f"slash voice {m}" for m in VOICE_ISOLATION_MODES)
+                    await self.push_frame(TTSSpeakFrame(f"Say {choices}."))
                 return
 
         await self.push_frame(frame, direction)
@@ -271,9 +277,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                 "spoken aloud, so avoid emojis, bullet points, or other formatting that can't "
                 "be spoken. Respond to what the user said in a creative, helpful, and brief way. "
                 "Voice isolation decides whose voice you hear: 'primary' keeps only the main "
-                "speaker (the default), 'all' hears everyone in the room. "
+                "speaker, 'all' hears everyone in the room. The modes available right now "
+                f"are: {', '.join(VOICE_ISOLATION_MODES)} (current: {VOICE_ISOLATION_MODE}). "
                 "Whenever the user picks or changes a mode, call set_voice_isolation and then "
-                "confirm in one short sentence."
+                "confirm in one short sentence; if they ask for a mode that is not available, "
+                "say so."
             ),
         ),
     )
@@ -320,16 +328,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_connected(transport, client):
         logger.info("Client connected")
         # Kick off the conversation.
-        context.add_message(
-            {
-                "role": "developer",
-                "content": (
-                    "Introduce yourself in one sentence, then ask whether you should listen "
-                    "to the primary speaker only or to all voices in the room "
-                    f"(currently: {VOICE_ISOLATION_MODE})."
-                ),
-            }
-        )
+        if len(VOICE_ISOLATION_MODES) > 1:
+            opening = (
+                "Introduce yourself in one sentence, then ask whether you should listen "
+                "to the primary speaker only or to all voices in the room "
+                f"(currently: {VOICE_ISOLATION_MODE})."
+            )
+        else:
+            opening = (
+                "Introduce yourself in one sentence and mention that you are listening "
+                f"to {'all voices in the room' if VOICE_ISOLATION_MODE == 'all' else 'the primary speaker only'}."
+            )
+        context.add_message({"role": "developer", "content": opening})
         await worker.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
