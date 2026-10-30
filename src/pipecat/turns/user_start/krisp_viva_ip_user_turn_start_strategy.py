@@ -17,8 +17,8 @@ interrupted by brief acknowledgements or filler words. While the bot is not
 speaking there is nothing to filter, so a user turn starts as soon as VAD
 detects speech.
 
-The IP model requires a ``krisp_audio`` build whose IP ``process()`` accepts a
-bot-speaking flag as its third argument.
+The IP model requires ``krisp_audio`` 1.14.0 or newer, whose IP ``process()``
+accepts a bot-speaking flag as its third argument.
 """
 
 import os
@@ -287,9 +287,9 @@ class KrispVivaIPUserTurnStartStrategy(BaseUserTurnStartStrategy):
                 )
             except TypeError as e:
                 raise RuntimeError(
-                    "KrispVivaIPUserTurnStartStrategy requires a krisp_audio build whose IP "
-                    "process() accepts (frame, voice_detected, bot_speaking); "
-                    f"the installed SDK rejected the call: {e}"
+                    f"Krisp IP process() raised TypeError: {e}. If this is a signature "
+                    "mismatch, upgrade krisp_audio to 1.14.0 or newer, whose IP process() "
+                    "accepts (frame, voice_detected, bot_speaking)."
                 ) from e
 
             if self._speech_active and not self._decision_made and ip_prob >= self._threshold:
